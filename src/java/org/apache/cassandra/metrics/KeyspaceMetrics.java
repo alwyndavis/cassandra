@@ -79,6 +79,8 @@ public class KeyspaceMetrics
     public final Histogram tombstoneScannedHistogram;
     /** Live cells scanned in queries on this Keyspace */
     public final Histogram liveScannedHistogram;
+    /** Mutation size distribution on this Keyspace */
+    public final Histogram mutationSizeHistogram;
     /** Column update time delta on this Keyspace */
     public final Histogram colUpdateTimeDeltaHistogram;
     /** time taken acquiring the partition lock for materialized view updates on this keyspace */
@@ -227,6 +229,7 @@ public class KeyspaceMetrics
         sstablesPerReadHistogram = Metrics.histogram(factory.createMetricName("SSTablesPerReadHistogram"), true);
         tombstoneScannedHistogram = Metrics.histogram(factory.createMetricName("TombstoneScannedHistogram"), false);
         liveScannedHistogram = Metrics.histogram(factory.createMetricName("LiveScannedHistogram"), false);
+        mutationSizeHistogram = Metrics.histogram(factory.createMetricName("MutationSizeHistogram"), false);
         colUpdateTimeDeltaHistogram = Metrics.histogram(factory.createMetricName("ColUpdateTimeDeltaHistogram"), false);
         viewLockAcquireTime =  Metrics.timer(factory.createMetricName("ViewLockAcquireTime"));
         viewReadTime = Metrics.timer(factory.createMetricName("ViewReadTime"));

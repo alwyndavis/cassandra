@@ -124,6 +124,8 @@ public class TableMetrics
     public final TableHistogram tombstoneScannedHistogram;
     /** Live cells scanned in queries on this CF */
     public final TableHistogram liveScannedHistogram;
+    /** Mutation size distribution on this Keyspace */
+    public final TableHistogram mutationSizeHistogram;
     /** Column update time delta on this CF */
     public final TableHistogram colUpdateTimeDeltaHistogram;
     /** time taken acquiring the partition lock for materialized view updates for this table */
@@ -661,6 +663,7 @@ public class TableMetrics
         });
         tombstoneScannedHistogram = createTableHistogram("TombstoneScannedHistogram", cfs.keyspace.metric.tombstoneScannedHistogram, false);
         liveScannedHistogram = createTableHistogram("LiveScannedHistogram", cfs.keyspace.metric.liveScannedHistogram, false);
+        mutationSizeHistogram = createTableHistogram("MutationSizeHistogram", cfs.keyspace.metric.mutationSizeHistogram, false);
         colUpdateTimeDeltaHistogram = createTableHistogram("ColUpdateTimeDeltaHistogram", cfs.keyspace.metric.colUpdateTimeDeltaHistogram, false);
         coordinatorReadLatency = Metrics.timer(factory.createMetricName("CoordinatorReadLatency"));
         coordinatorScanLatency = Metrics.timer(factory.createMetricName("CoordinatorScanLatency"));

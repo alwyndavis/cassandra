@@ -1322,6 +1322,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             metric.samplers.get(Sampler.WRITES).addSample(key.getKey(), key.hashCode(), 1);
             StorageHook.instance.reportWrite(metadata.cfId, update);
             metric.writeLatency.addNano(System.nanoTime() - start);
+            metric.mutationSizeHistogram.update(update.dataSize());
             if(timeDelta < Long.MAX_VALUE)
                 metric.colUpdateTimeDeltaHistogram.update(timeDelta);
         }

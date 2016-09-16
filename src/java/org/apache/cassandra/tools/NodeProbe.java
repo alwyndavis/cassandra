@@ -1296,6 +1296,7 @@ public class NodeProbe implements AutoCloseable
                 case "LiveScannedHistogram":
                 case "SSTablesPerReadHistogram":
                 case "TombstoneScannedHistogram":
+                case "MutationSizeHistogram":
                     return JMX.newMBeanProxy(mbeanServerConn, oName, CassandraMetricsRegistry.JmxHistogramMBean.class);
                 default:
                     throw new RuntimeException("Unknown table metric " + metricName);

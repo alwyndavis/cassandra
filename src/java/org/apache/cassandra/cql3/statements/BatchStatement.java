@@ -35,6 +35,7 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.exceptions.*;
+import org.apache.cassandra.metrics.BatchMetrics;
 import org.apache.cassandra.service.*;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.messages.ResultMessage;
@@ -259,7 +260,7 @@ public class BatchStatement implements CQLStatement
     /**
      * Checks batch size to ensure threshold is met. If not, a warning is logged.
      *
-     * @param updates - the batch mutations.
+     * @param mutations - the batch mutations.
      */
     private static void verifyBatchSize(Collection<? extends IMutation> mutations) throws InvalidRequestException
     {
@@ -369,6 +370,14 @@ public class BatchStatement implements CQLStatement
         verifyBatchSize(mutations);
         verifyBatchType(mutations);
 
+        if (isLogged()) {
+            BatchMetrics.instance.partitionsPerLoggedBatch.update(mutations.size());
+        } else if (isCounter()) {
+            BatchMetrics.instance.partitionsPerCounterBatch.update(mutations.size());
+        } else {
+            BatchMetrics.instance.partitionsPerUnloggedBatch.update(mutations.size());
+        }
+
         boolean mutateAtomic = (isLogged() && mutations.size() > 1);
         StorageProxy.mutateWithTriggers(mutations, cl, mutateAtomic, queryStartNanoTime);
     }
@@ -392,10 +401,19 @@ public class BatchStatement implements CQLStatement
                                                    state.getClientState(),
                                                    queryStartNanoTime))
         {
-            return new ResultMessage.Rows(ModificationStatement.buildCasResultSet(ksName, tableName, result, columnsWithConditions, true, options.forStatement(0)));
+
+            ResultMessage.Rows casResultSet = new ResultMessage.Rows(ModificationStatement.buildCasResultSet(ksName, tableName, result, columnsWithConditions, true, options.forStatement(0)));
+            if (isLogged()) {
+                BatchMetrics.instance.partitionsPerLoggedBatch.update(casResultSet.result.size());
+            } else if (isCounter()) {
+                BatchMetrics.instance.partitionsPerCounterBatch.update(casResultSet.result.size());
+            } else {
+                BatchMetrics.instance.partitionsPerUnloggedBatch.update(casResultSet.result.size());
+            }
+
+            return casResultSet;
         }
     }
-
 
     private Pair<CQL3CasRequest,Set<ColumnDefinition>> makeCasRequest(BatchQueryOptions options, QueryState state)
     {
