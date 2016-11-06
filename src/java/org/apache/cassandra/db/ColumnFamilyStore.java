@@ -1288,7 +1288,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 float flushingOnHeap = Memtable.MEMORY_POOL.onHeap.reclaimingRatio();
                 float flushingOffHeap = Memtable.MEMORY_POOL.offHeap.reclaimingRatio();
                 float thisOnHeap = largest.getAllocator().onHeap().ownershipRatio();
-                float thisOffHeap = largest.getAllocator().onHeap().ownershipRatio();
+                float thisOffHeap = largest.getAllocator().offHeap().ownershipRatio();
                 logger.debug("Flushing largest {} to free up room. Used total: {}, live: {}, flushing: {}, this: {}",
                             largest.cfs, ratio(usedOnHeap, usedOffHeap), ratio(liveOnHeap, liveOffHeap),
                             ratio(flushingOnHeap, flushingOffHeap), ratio(thisOnHeap, thisOffHeap));
@@ -1322,9 +1322,13 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             metric.samplers.get(Sampler.WRITES).addSample(key.getKey(), key.hashCode(), 1);
             StorageHook.instance.reportWrite(metadata.cfId, update);
             metric.writeLatency.addNano(System.nanoTime() - start);
-            metric.mutationSizeHistogram.update(update.dataSize());
+            // CASSANDRA-11117 - certain resolution paths on memtable put can result in very
+            // large time deltas, either through a variety of sentinel timestamps (used for empty values, ensuring
+            // a minimal write, etc). This limits the time delta to the max value the histogram
+            // can bucket correctly. This also filters the Long.MAX_VALUE case where there was no previous value
+            // to update.
             if(timeDelta < Long.MAX_VALUE)
-                metric.colUpdateTimeDeltaHistogram.update(timeDelta);
+                metric.colUpdateTimeDeltaHistogram.update(Math.min(18165375903306L, timeDelta));
         }
         catch (RuntimeException e)
         {
@@ -2475,6 +2479,11 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     public int[] getSSTableCountPerLevel()
     {
         return compactionStrategyManager.getSSTableCountPerLevel();
+    }
+
+    public int getLevelFanoutSize()
+    {
+        return compactionStrategyManager.getLevelFanoutSize();
     }
 
     public static class ViewFragment

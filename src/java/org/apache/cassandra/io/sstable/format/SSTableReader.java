@@ -1664,37 +1664,17 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         return isSuspect.get();
     }
 
-
-    /**
-     * I/O SSTableScanner
-     * @return A Scanner for seeking over the rows of the SSTable.
-     */
-    public ISSTableScanner getScanner()
-    {
-        return getScanner((RateLimiter) null);
-    }
-
-    /**
-     * @param columns the columns to return.
-     * @param dataRange filter to use when reading the columns
-     * @return A Scanner for seeking over the rows of the SSTable.
-     */
-    public ISSTableScanner getScanner(ColumnFilter columns, DataRange dataRange, boolean isForThrift)
-    {
-        return getScanner(columns, dataRange, null, isForThrift);
-    }
-
     /**
      * Direct I/O SSTableScanner over a defined range of tokens.
      *
      * @param range the range of keys to cover
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public ISSTableScanner getScanner(Range<Token> range, RateLimiter limiter)
+    public ISSTableScanner getScanner(Range<Token> range)
     {
         if (range == null)
-            return getScanner(limiter);
-        return getScanner(Collections.singletonList(range), limiter);
+            return getScanner();
+        return getScanner(Collections.singletonList(range));
     }
 
     /**
@@ -1702,7 +1682,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      *
      * @return A Scanner over the full content of the SSTable.
      */
-    public abstract ISSTableScanner getScanner(RateLimiter limiter);
+    public abstract ISSTableScanner getScanner();
 
     /**
      * Direct I/O SSTableScanner over a defined collection of ranges of tokens.
@@ -1710,7 +1690,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      * @param ranges the range of keys to cover
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public abstract ISSTableScanner getScanner(Collection<Range<Token>> ranges, RateLimiter limiter);
+    public abstract ISSTableScanner getScanner(Collection<Range<Token>> ranges);
 
     /**
      * Direct I/O SSTableScanner over an iterator of bounds.
@@ -1725,7 +1705,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      * @param dataRange filter to use when reading the columns
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public abstract ISSTableScanner getScanner(ColumnFilter columns, DataRange dataRange, RateLimiter limiter, boolean isForThrift);
+    public abstract ISSTableScanner getScanner(ColumnFilter columns, DataRange dataRange, boolean isForThrift);
 
     public FileDataInput getFileDataInput(long position)
     {
@@ -1910,7 +1890,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         return sstableMetadata.maxLocalDeletionTime;
     }
 
-    /** sstable contains no tombstones if maxLocalDeletionTime == Integer.MAX_VALUE */
+    /** sstable contains no tombstones if minLocalDeletionTime == Integer.MAX_VALUE */
     public boolean hasTombstones()
     {
         // sstable contains no tombstone if minLocalDeletionTime is still set to  the default value Integer.MAX_VALUE
@@ -2136,7 +2116,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         private Ref<GlobalTidy> globalRef;
         private GlobalTidy global;
 
-        private boolean setup;
+        private volatile boolean setup;
 
         void setup(SSTableReader reader, boolean trackHotness)
         {
@@ -2160,6 +2140,9 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
 
         public void tidy()
         {
+            if (logger.isTraceEnabled())
+                logger.trace("Running instance tidier for {} with setup {}", descriptor, setup);
+
             // don't try to cleanup if the sstablereader was never fully constructed
             if (!setup)
                 return;
@@ -2178,8 +2161,15 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             {
                 public void run()
                 {
+                    if (logger.isTraceEnabled())
+                        logger.trace("Async instance tidier for {}, before barrier", descriptor);
+
                     if (barrier != null)
                         barrier.await();
+
+                    if (logger.isTraceEnabled())
+                        logger.trace("Async instance tidier for {}, after barrier", descriptor);
+
                     if (bf != null)
                         bf.close();
                     if (summary != null)
@@ -2191,6 +2181,9 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
                     if (ifile != null)
                         ifile.close();
                     globalRef.release();
+
+                    if (logger.isTraceEnabled())
+                        logger.trace("Async instance tidier for {}, completed", descriptor);
                 }
             });
         }

@@ -28,6 +28,8 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
@@ -39,8 +41,10 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.concurrent.ExecutorLocals;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.concurrent.Stage;
@@ -419,18 +423,17 @@ public final class MessagingService implements MessagingServiceMBean
                                                                    Verb.BATCH_STORE,
                                                                    Verb.BATCH_REMOVE);
 
-
     private static final class DroppedMessages
     {
         final DroppedMessageMetrics metrics;
-        final AtomicInteger droppedInternalTimeout;
-        final AtomicInteger droppedCrossNodeTimeout;
+        final AtomicInteger droppedInternal;
+        final AtomicInteger droppedCrossNode;
 
         DroppedMessages(Verb verb)
         {
             this.metrics = new DroppedMessageMetrics(verb);
-            this.droppedInternalTimeout = new AtomicInteger(0);
-            this.droppedCrossNodeTimeout = new AtomicInteger(0);
+            this.droppedInternal = new AtomicInteger(0);
+            this.droppedCrossNode = new AtomicInteger(0);
         }
 
     }
@@ -445,20 +448,8 @@ public final class MessagingService implements MessagingServiceMBean
     // message sinks are a testing hook
     private final Set<IMessageSink> messageSinks = new CopyOnWriteArraySet<>();
 
-    public void addMessageSink(IMessageSink sink)
-    {
-        messageSinks.add(sink);
-    }
-
-    public void removeMessageSink(IMessageSink sink)
-    {
-        messageSinks.remove(sink);
-    }
-
-    public void clearMessageSinks()
-    {
-        messageSinks.clear();
-    }
+    // back-pressure implementation
+    private final BackPressureStrategy backPressure = DatabaseDescriptor.getBackPressureStrategy();
 
     private static class MSHandle
     {
@@ -504,9 +495,17 @@ public final class MessagingService implements MessagingServiceMBean
             public Object apply(Pair<Integer, ExpiringMap.CacheableObject<CallbackInfo>> pair)
             {
                 final CallbackInfo expiredCallbackInfo = pair.right.value;
+
                 maybeAddLatency(expiredCallbackInfo.callback, expiredCallbackInfo.target, pair.right.timeout);
+
                 ConnectionMetrics.totalTimeouts.mark();
                 getConnectionPool(expiredCallbackInfo.target).incrementTimeout();
+
+                if (expiredCallbackInfo.callback.supportsBackPressure())
+                {
+                    updateBackPressureOnReceive(expiredCallbackInfo.target, expiredCallbackInfo.callback, true);
+                }
+
                 if (expiredCallbackInfo.isFailureCallback())
                 {
                     StageManager.getStage(Stage.INTERNAL_RESPONSE).submit(new Runnable()
@@ -542,6 +541,76 @@ public final class MessagingService implements MessagingServiceMBean
             {
                 throw new RuntimeException(e);
             }
+        }
+    }
+
+    public void addMessageSink(IMessageSink sink)
+    {
+        messageSinks.add(sink);
+    }
+
+    public void removeMessageSink(IMessageSink sink)
+    {
+        messageSinks.remove(sink);
+    }
+
+    public void clearMessageSinks()
+    {
+        messageSinks.clear();
+    }
+
+    /**
+     * Updates the back-pressure state on sending to the given host if enabled and the given message callback supports it.
+     *
+     * @param host The replica host the back-pressure state refers to.
+     * @param callback The message callback.
+     * @param message The actual message.
+     */
+    public void updateBackPressureOnSend(InetAddress host, IAsyncCallback callback, MessageOut<?> message)
+    {
+        if (DatabaseDescriptor.backPressureEnabled() && callback.supportsBackPressure())
+        {
+            BackPressureState backPressureState = getConnectionPool(host).getBackPressureState();
+            backPressureState.onMessageSent(message);
+        }
+    }
+
+    /**
+     * Updates the back-pressure state on reception from the given host if enabled and the given message callback supports it.
+     *
+     * @param host The replica host the back-pressure state refers to.
+     * @param callback The message callback.
+     * @param timeout True if updated following a timeout, false otherwise.
+     */
+    public void updateBackPressureOnReceive(InetAddress host, IAsyncCallback callback, boolean timeout)
+    {
+        if (DatabaseDescriptor.backPressureEnabled() && callback.supportsBackPressure())
+        {
+            BackPressureState backPressureState = getConnectionPool(host).getBackPressureState();
+            if (!timeout)
+                backPressureState.onResponseReceived();
+            else
+                backPressureState.onResponseTimeout();
+        }
+    }
+
+    /**
+     * Applies back-pressure for the given hosts, according to the configured strategy.
+     *
+     * If the local host is present, it is removed from the pool, as back-pressure is only applied
+     * to remote hosts.
+     *
+     * @param hosts The hosts to apply back-pressure to.
+     * @param timeoutInNanos The max back-pressure timeout.
+     */
+    public void applyBackPressure(Iterable<InetAddress> hosts, long timeoutInNanos)
+    {
+        if (DatabaseDescriptor.backPressureEnabled())
+        {
+            backPressure.apply(StreamSupport.stream(hosts.spliterator(), false)
+                    .filter(h -> !h.equals(FBUtilities.getBroadcastAddress()))
+                    .map(h -> getConnectionPool(h).getBackPressureState())
+                    .collect(Collectors.toSet()), timeoutInNanos, TimeUnit.NANOSECONDS);
         }
     }
 
@@ -699,7 +768,7 @@ public final class MessagingService implements MessagingServiceMBean
         OutboundTcpConnectionPool cp = connectionManagers.get(to);
         if (cp == null)
         {
-            cp = new OutboundTcpConnectionPool(to);
+            cp = new OutboundTcpConnectionPool(to, backPressure.newState(to));
             OutboundTcpConnectionPool existingPool = connectionManagers.putIfAbsent(to, cp);
             if (existingPool != null)
                 cp = existingPool;
@@ -805,6 +874,7 @@ public final class MessagingService implements MessagingServiceMBean
     public int sendRR(MessageOut message, InetAddress to, IAsyncCallback cb, long timeout, boolean failureCallback)
     {
         int id = addCallback(cb, message, to, timeout, failureCallback);
+        updateBackPressureOnSend(to, cb, message);
         sendOneWay(failureCallback ? message.withParameter(FAILURE_CALLBACK_PARAM, ONE_BYTE) : message, id, to);
         return id;
     }
@@ -827,6 +897,7 @@ public final class MessagingService implements MessagingServiceMBean
                       boolean allowHints)
     {
         int id = addCallback(handler, message, to, message.getTimeout(), handler.consistencyLevel, allowHints);
+        updateBackPressureOnSend(to, handler, message);
         sendOneWay(message.withParameter(FAILURE_CALLBACK_PARAM, ONE_BYTE), id, to);
         return id;
     }
@@ -895,7 +966,8 @@ public final class MessagingService implements MessagingServiceMBean
         assert !StageManager.getStage(Stage.MUTATION).isShutdown();
 
         // the important part
-        callbacks.shutdownBlocking();
+        if (!callbacks.shutdownBlocking())
+            logger.warn("Failed to wait for messaging service callbacks shutdown");
 
         // attempt to humor tests that try to stop and restart MS
         try
@@ -1088,19 +1160,19 @@ public final class MessagingService implements MessagingServiceMBean
         {
             updateDroppedMutationCount((IMutation) message.payload);
         }
-        incrementDroppedMessages(message.verb, timeTaken, message.constructionTime.isCrossNode);
+        incrementDroppedMessages(message.verb, timeTaken, message.isCrossNode());
     }
 
-    public void incrementDroppedMessages(Verb verb, long timeTaken, boolean isCrossNodeTimeout)
+    public void incrementDroppedMessages(Verb verb, long timeTaken, boolean isCrossNode)
     {
         assert DROPPABLE_VERBS.contains(verb) : "Verb " + verb + " should not legally be dropped";
-        incrementDroppedMessages(droppedMessagesMap.get(verb), timeTaken, isCrossNodeTimeout);
+        incrementDroppedMessages(droppedMessagesMap.get(verb), timeTaken, isCrossNode);
     }
 
-    public void incrementDroppedMessages(Verb verb, boolean isCrossNodeTimeout)
+    public void incrementDroppedMessages(Verb verb, boolean isCrossNode)
     {
         assert DROPPABLE_VERBS.contains(verb) : "Verb " + verb + " should not legally be dropped";
-        incrementDroppedMessages(droppedMessagesMap.get(verb), isCrossNodeTimeout);
+        incrementDroppedMessages(droppedMessagesMap.get(verb), isCrossNode);
     }
 
     private void updateDroppedMutationCount(IMutation mutation)
@@ -1117,22 +1189,22 @@ public final class MessagingService implements MessagingServiceMBean
         }
     }
 
-    private void incrementDroppedMessages(DroppedMessages droppedMessages, long timeTaken, boolean isCrossNodeTimeout)
+    private void incrementDroppedMessages(DroppedMessages droppedMessages, long timeTaken, boolean isCrossNode)
     {
-        if (isCrossNodeTimeout)
+        if (isCrossNode)
             droppedMessages.metrics.crossNodeDroppedLatency.update(timeTaken, TimeUnit.MILLISECONDS);
         else
             droppedMessages.metrics.internalDroppedLatency.update(timeTaken, TimeUnit.MILLISECONDS);
-        incrementDroppedMessages(droppedMessages, isCrossNodeTimeout);
+        incrementDroppedMessages(droppedMessages, isCrossNode);
     }
 
-    private void incrementDroppedMessages(DroppedMessages droppedMessages, boolean isCrossNodeTimeout)
+    private void incrementDroppedMessages(DroppedMessages droppedMessages, boolean isCrossNode)
     {
         droppedMessages.metrics.dropped.mark();
-        if (isCrossNodeTimeout)
-            droppedMessages.droppedCrossNodeTimeout.incrementAndGet();
+        if (isCrossNode)
+            droppedMessages.droppedCrossNode.incrementAndGet();
         else
-            droppedMessages.droppedInternalTimeout.incrementAndGet();
+            droppedMessages.droppedInternal.incrementAndGet();
     }
 
     private void logDroppedMessages()
@@ -1154,16 +1226,16 @@ public final class MessagingService implements MessagingServiceMBean
             Verb verb = entry.getKey();
             DroppedMessages droppedMessages = entry.getValue();
 
-            int droppedInternalTimeout = droppedMessages.droppedInternalTimeout.getAndSet(0);
-            int droppedCrossNodeTimeout = droppedMessages.droppedCrossNodeTimeout.getAndSet(0);
-            if (droppedInternalTimeout > 0 || droppedCrossNodeTimeout > 0)
+            int droppedInternal = droppedMessages.droppedInternal.getAndSet(0);
+            int droppedCrossNode = droppedMessages.droppedCrossNode.getAndSet(0);
+            if (droppedInternal > 0 || droppedCrossNode > 0)
             {
-                ret.add(String.format("%s messages were dropped in last %d ms: %d for internal timeout and %d for cross node timeout."
+                ret.add(String.format("%s messages were dropped in last %d ms: %d internal and %d cross node."
                                      + " Mean internal dropped latency: %d ms and Mean cross-node dropped latency: %d ms",
                                      verb,
                                      LOG_DROPPED_INTERVAL_IN_MS,
-                                     droppedInternalTimeout,
-                                     droppedCrossNodeTimeout,
+                                     droppedInternal,
+                                     droppedCrossNode,
                                      TimeUnit.NANOSECONDS.toMillis((long)droppedMessages.metrics.internalDroppedLatency.getSnapshot().getMean()),
                                      TimeUnit.NANOSECONDS.toMillis((long)droppedMessages.metrics.crossNodeDroppedLatency.getSnapshot().getMean())));
             }
@@ -1377,6 +1449,27 @@ public final class MessagingService implements MessagingServiceMBean
             result.put(ip, recent);
         }
         return result;
+    }
+
+    public Map<String, Double> getBackPressurePerHost()
+    {
+        Map<String, Double> map = new HashMap<>(connectionManagers.size());
+        for (Map.Entry<InetAddress, OutboundTcpConnectionPool> entry : connectionManagers.entrySet())
+            map.put(entry.getKey().getHostAddress(), entry.getValue().getBackPressureState().getBackPressureRateLimit());
+
+        return map;
+    }
+
+    @Override
+    public void setBackPressureEnabled(boolean enabled)
+    {
+        DatabaseDescriptor.setBackPressureEnabled(enabled);
+    }
+
+    @Override
+    public boolean isBackPressureEnabled()
+    {
+        return DatabaseDescriptor.backPressureEnabled();
     }
 
     public static IPartitioner globalPartitioner()

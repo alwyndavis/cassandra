@@ -36,6 +36,9 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterators;
 import org.apache.commons.lang3.StringUtils;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -45,6 +48,8 @@ import org.apache.cassandra.db.Directories.DataDirectory;
 import org.apache.cassandra.db.compaction.AbstractCompactionTask;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.AsciiType;
+import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.dht.IPartitioner;
@@ -57,6 +62,8 @@ import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.service.pager.PagingState;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CounterId;
 import org.apache.cassandra.utils.FBUtilities;
@@ -67,7 +74,9 @@ import static org.junit.Assert.assertTrue;
 
 public class Util
 {
-    private static List<UUID> hostIdPool = new ArrayList<UUID>();
+    private static final Logger logger = LoggerFactory.getLogger(Util.class);
+
+    private static List<UUID> hostIdPool = new ArrayList<>();
 
     public static IPartitioner testPartitioner()
     {
@@ -601,10 +610,9 @@ public class Util
         AssertionError e = runCatchingAssertionError(test);
         if (e == null)
             return;     // success
-        System.err.format("Test failed. %s%n"
-                        + "Re-running %d times to verify it isn't failing more often than it should.%n"
-                        + "Failure was: %s%n", message, rerunsOnFailure, e);
-        e.printStackTrace();
+
+        logger.info("Test failed. {}", message, e);
+        logger.info("Re-running {} times to verify it isn't failing more often than it should.", rerunsOnFailure);
 
         int rerunsFailed = 0;
         for (int i = 0; i < rerunsOnFailure; ++i)
@@ -614,15 +622,17 @@ public class Util
             {
                 ++rerunsFailed;
                 e.addSuppressed(t);
+
+                logger.debug("Test failed again, total num failures: {}", rerunsFailed, t);
             }
         }
         if (rerunsFailed > 0)
         {
-            System.err.format("Test failed in %d of the %d reruns.%n", rerunsFailed, rerunsOnFailure);
+            logger.error("Test failed in {} of the {} reruns.", rerunsFailed, rerunsOnFailure);
             throw e;
         }
 
-        System.err.println("All reruns succeeded. Failure treated as flake.");
+        logger.info("All reruns succeeded. Failure treated as flake.");
     }
 
     // for use with Optional in tests, can be used as an argument to orElseThrow
@@ -701,4 +711,23 @@ public class Util
         }
         return () -> BlacklistedDirectories.clearUnwritableUnsafe();
     }
+
+    public static PagingState makeSomePagingState(ProtocolVersion protocolVersion)
+    {
+        CFMetaData metadata = CFMetaData.Builder.create("ks", "tbl")
+                                                .addPartitionKey("k", AsciiType.instance)
+                                                .addClusteringColumn("c1", AsciiType.instance)
+                                                .addClusteringColumn("c1", Int32Type.instance)
+                                                .addRegularColumn("myCol", AsciiType.instance)
+                                                .build();
+
+        ByteBuffer pk = ByteBufferUtil.bytes("someKey");
+
+        ColumnDefinition def = metadata.getColumnDefinition(new ColumnIdentifier("myCol", false));
+        Clustering c = Clustering.make(ByteBufferUtil.bytes("c1"), ByteBufferUtil.bytes(42));
+        Row row = BTreeRow.singleCellRow(c, BufferCell.live(def, 0, ByteBufferUtil.EMPTY_BYTE_BUFFER));
+        PagingState.RowMark mark = PagingState.RowMark.create(metadata, row, protocolVersion);
+        return new PagingState(pk, mark, 10, 0);
+    }
+
 }

@@ -15,27 +15,37 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.cassandra.net;
 
-package org.apache.cassandra.db.monitoring;
+import java.net.InetAddress;
 
-public final class ConstructionTime
+/**
+ * Interface meant to track the back-pressure state per replica host.
+ */
+public interface BackPressureState
 {
-    public final long timestamp;
-    public final boolean isCrossNode;
+    /**
+     * Called when a message is sent to a replica.
+     */
+    void onMessageSent(MessageOut<?> message);
 
-    public ConstructionTime()
-    {
-        this(ApproximateTime.currentTimeMillis());
-    }
+    /**
+     * Called when a response is received from a replica.
+     */
+    void onResponseReceived();
 
-    public ConstructionTime(long timestamp)
-    {
-        this(timestamp, false);
-    }
+    /**
+     * Called when no response is received from replica.
+     */
+    void onResponseTimeout();
 
-    public ConstructionTime(long timestamp, boolean isCrossNode)
-    {
-        this.timestamp = timestamp;
-        this.isCrossNode = isCrossNode;
-    }
+    /**
+     * Gets the current back-pressure rate limit.
+     */
+    double getBackPressureRateLimit();
+
+    /**
+     * Returns the host this state refers to.
+     */
+    InetAddress getHost();
 }

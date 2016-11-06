@@ -26,6 +26,7 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
@@ -37,7 +38,7 @@ public abstract class Constants
 
     public enum Type
     {
-        STRING, INTEGER, UUID, FLOAT, BOOLEAN, HEX;
+        STRING, INTEGER, UUID, FLOAT, BOOLEAN, HEX, DURATION;
     }
 
     private static class UnsetLiteral extends Term.Raw
@@ -156,6 +157,11 @@ public abstract class Constants
             return new Literal(Type.HEX, text);
         }
 
+        public static Literal duration(String text)
+        {
+            return new Literal(Type.DURATION, text);
+        }
+
         public Value prepare(String keyspace, ColumnSpecification receiver) throws InvalidRequestException
         {
             if (!testAssignment(keyspace, receiver).isAssignable())
@@ -221,6 +227,7 @@ public abstract class Constants
                         case DATE:
                         case DECIMAL:
                         case DOUBLE:
+                        case DURATION:
                         case FLOAT:
                         case INT:
                         case SMALLINT:
@@ -262,6 +269,13 @@ public abstract class Constants
                             return AssignmentTestable.TestResult.WEAKLY_ASSIGNABLE;
                     }
                     break;
+                case DURATION:
+                    switch (nt)
+                    {
+                        case DURATION:
+                            return AssignmentTestable.TestResult.WEAKLY_ASSIGNABLE;
+                    }
+                    break;
             }
             return AssignmentTestable.TestResult.NOT_ASSIGNABLE;
         }
@@ -299,7 +313,7 @@ public abstract class Constants
             this.bytes = bytes;
         }
 
-        public ByteBuffer get(int protocolVersion)
+        public ByteBuffer get(ProtocolVersion protocolVersion)
         {
             return bytes;
         }

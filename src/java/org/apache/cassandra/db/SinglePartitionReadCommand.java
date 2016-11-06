@@ -54,6 +54,7 @@ import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.pager.*;
 import org.apache.cassandra.thrift.ThriftResultsMerger;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTreeSet;
@@ -351,12 +352,12 @@ public class SinglePartitionReadCommand extends ReadCommand
         return StorageProxy.read(Group.one(this), consistency, clientState, queryStartNanoTime);
     }
 
-    public SinglePartitionPager getPager(PagingState pagingState, int protocolVersion)
+    public SinglePartitionPager getPager(PagingState pagingState, ProtocolVersion protocolVersion)
     {
         return getPager(this, pagingState, protocolVersion);
     }
 
-    private static SinglePartitionPager getPager(SinglePartitionReadCommand command, PagingState pagingState, int protocolVersion)
+    private static SinglePartitionPager getPager(SinglePartitionReadCommand command, PagingState pagingState, ProtocolVersion protocolVersion)
     {
         return new SinglePartitionPager(command, pagingState, protocolVersion);
     }
@@ -423,7 +424,11 @@ public class SinglePartitionReadCommand extends ReadCommand
         cfs.metric.rowCacheMiss.inc();
         Tracing.trace("Row cache miss");
 
-        boolean cacheFullPartitions = metadata().params.caching.cacheAllRows();
+        // Note that on tables with no clustering keys, any positive value of
+        // rowsToCache implies caching the full partition
+        boolean cacheFullPartitions = metadata().clusteringColumns().size() > 0 ?
+                                      metadata().params.caching.cacheAllRows() :
+                                      metadata().params.caching.cacheRows();
 
         // To be able to cache what we read, what we read must at least covers what the cache holds, that
         // is the 'rowsToCache' first rows of the partition. We could read those 'rowsToCache' first rows
@@ -523,11 +528,11 @@ public class SinglePartitionReadCommand extends ReadCommand
          *   2) If we have a name filter (so we query specific rows), we can make a bet: that all column for all queried row
          *      will have data in the most recent sstable(s), thus saving us from reading older ones. This does imply we
          *      have a way to guarantee we have all the data for what is queried, which is only possible for name queries
-         *      and if we have neither collections nor counters (indeed, for a collection, we can't guarantee an older sstable
-         *      won't have some elements that weren't in the most recent sstables, and counters are intrinsically a collection
-         *      of shards so have the same problem).
+         *      and if we have neither non-frozen collections/UDTs nor counters (indeed, for a non-frozen collection or UDT,
+         *      we can't guarantee an older sstable won't have some elements that weren't in the most recent sstables,
+         *      and counters are intrinsically a collection of shards and so have the same problem).
          */
-        if (clusteringIndexFilter() instanceof ClusteringIndexNamesFilter && queryNeitherCountersNorCollections())
+        if (clusteringIndexFilter() instanceof ClusteringIndexNamesFilter && !queriesMulticellType())
             return queryMemtableAndSSTablesInTimestampOrder(cfs, (ClusteringIndexNamesFilter)clusteringIndexFilter());
 
         Tracing.trace("Acquiring sstable references");
@@ -584,6 +589,7 @@ public class SinglePartitionReadCommand extends ReadCommand
                         if (skippedSSTablesWithTombstones == null)
                             skippedSSTablesWithTombstones = new ArrayList<>();
                         skippedSSTablesWithTombstones.add(sstable);
+
                     }
                     continue;
                 }
@@ -701,14 +707,14 @@ public class SinglePartitionReadCommand extends ReadCommand
         return Transformation.apply(merged, new UpdateSstablesIterated());
     }
 
-    private boolean queryNeitherCountersNorCollections()
+    private boolean queriesMulticellType()
     {
         for (ColumnDefinition column : columnFilter().fetchedColumns())
         {
-            if (column.type.isCollection() || column.type.isCounter())
-                return false;
+            if (column.type.isMultiCell() || column.type.isCounter())
+                return true;
         }
-        return true;
+        return false;
     }
 
     /**
@@ -774,7 +780,7 @@ public class SinglePartitionReadCommand extends ReadCommand
                 sstable.incrementReadCount();
                 try (UnfilteredRowIterator iter = StorageHook.instance.makeRowIterator(cfs, sstable, partitionKey(), Slices.ALL, columnFilter(), filter.isReversed(), isForThrift()))
                 {
-                    if (iter.partitionLevelDeletion().isLive())
+                    if (!iter.partitionLevelDeletion().isLive())
                     {
                         sstablesIterated++;
                         result = add(UnfilteredRowIterators.noRowsIterator(iter.metadata(), iter.partitionKey(), Rows.EMPTY_STATIC_ROW, iter.partitionLevelDeletion(), filter.isReversed()), result, filter, sstable.isRepaired());
@@ -1046,7 +1052,7 @@ public class SinglePartitionReadCommand extends ReadCommand
             return UnfilteredPartitionIterators.concat(partitions.stream().map(p -> p.getRight()).collect(Collectors.toList()));
         }
 
-        public QueryPager getPager(PagingState pagingState, int protocolVersion)
+        public QueryPager getPager(PagingState pagingState, ProtocolVersion protocolVersion)
         {
             if (commands.size() == 1)
                 return SinglePartitionReadCommand.getPager(commands.get(0), pagingState, protocolVersion);

@@ -40,13 +40,14 @@ import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertTrue;
 
 public class ViewTest extends CQLTester
 {
-    int protocolVersion = 4;
+    ProtocolVersion protocolVersion = ProtocolVersion.V4;
     private final List<String> views = new ArrayList<>();
 
     @BeforeClass
@@ -344,6 +345,27 @@ public class ViewTest extends CQLTester
         }
         catch (InvalidQueryException e)
         {
+        }
+    }
+
+    @Test
+    public void testDurationsTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "k int PRIMARY KEY, " +
+                    "result duration)");
+
+        execute("USE " + keyspace());
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        try
+        {
+            createView("mv_duration", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE result IS NOT NULL AND k IS NOT NULL PRIMARY KEY (result,k)");
+            Assert.fail("MV on duration should fail");
+        }
+        catch (InvalidQueryException e)
+        {
+            Assert.assertEquals("Cannot use Duration column 'result' in PRIMARY KEY of materialized view", e.getMessage());
         }
     }
 
@@ -1149,5 +1171,25 @@ public class ViewTest extends CQLTester
         executeNet(protocolVersion, "UPDATE %s SET v2=? WHERE id1=? AND id2=?", "rab", 0, 1);
         assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM %s"), row(0, 1, null, "rab"));
         assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM mv"));
+    }
+
+    @Test
+    public void testReservedKeywordsInMV() throws Throwable
+    {
+        createTable("CREATE TABLE %s (\"token\" int PRIMARY KEY, \"keyspace\" int)");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv",
+                   "CREATE MATERIALIZED VIEW %s AS" +
+                   "  SELECT \"keyspace\", \"token\"" +
+                   "  FROM %%s" +
+                   "  WHERE \"keyspace\" IS NOT NULL AND \"token\" IS NOT NULL" +
+                   "  PRIMARY KEY (\"keyspace\", \"token\")");
+
+        execute("INSERT INTO %s (\"token\", \"keyspace\") VALUES (?, ?)", 0, 1);
+
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM %s"), row(0, 1));
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM mv"), row(1, 0));
     }
 }

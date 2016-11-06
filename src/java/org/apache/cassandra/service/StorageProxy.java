@@ -25,6 +25,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
@@ -33,7 +34,9 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.collect.*;
 import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.Uninterruptibles;
+
 import org.apache.commons.lang3.StringUtils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,7 +52,6 @@ import org.apache.cassandra.config.SchemaConstants;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.TombstoneOverwhelmingException;
-import org.apache.cassandra.db.monitoring.ConstructionTime;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.ViewUtils;
@@ -318,12 +320,17 @@ public class StorageProxy implements StorageProxyMBean
         }
         finally
         {
-            if(contentions > 0)
-                casWriteMetrics.contention.update(contentions);
+            recordCasContention(contentions);
             final long latency = System.nanoTime() - startTimeForMetrics;
             casWriteMetrics.addNano(latency);
             writeMetricsMap.get(consistencyForPaxos).addNano(latency);
         }
+    }
+
+    private static void recordCasContention(int contentions)
+    {
+        if(contentions > 0)
+            casWriteMetrics.contention.update(contentions);
     }
 
     private static Predicate<InetAddress> sameDCPredicateFor(final String dc)
@@ -436,6 +443,7 @@ public class StorageProxy implements StorageProxyMBean
                     }
                     catch (WriteTimeoutException e)
                     {
+                        recordCasContention(contentions);
                         // We're still doing preparation for the paxos rounds, so we want to use the CAS (see CASSANDRA-8672)
                         throw new WriteTimeoutException(WriteType.CAS, e.consistency, e.received, e.blockFor);
                     }
@@ -470,6 +478,7 @@ public class StorageProxy implements StorageProxyMBean
             return Pair.create(ballot, contentions);
         }
 
+        recordCasContention(contentions);
         throw new WriteTimeoutException(WriteType.CAS, consistencyForPaxos, 0, consistencyForPaxos.blockFor(Keyspace.open(metadata.ksName)));
     }
 
@@ -527,6 +536,7 @@ public class StorageProxy implements StorageProxyMBean
         {
             AbstractReplicationStrategy rs = keyspace.getReplicationStrategy();
             responseHandler = rs.getWriteResponseHandler(naturalEndpoints, pendingEndpoints, consistencyLevel, null, WriteType.SIMPLE, queryStartNanoTime);
+            responseHandler.setSupportsBackPressure(false);
         }
 
         MessageOut<Commit> message = new MessageOut<Commit>(MessagingService.Verb.PAXOS_COMMIT, proposal, Commit.serializer);
@@ -1224,6 +1234,10 @@ public class StorageProxy implements StorageProxyMBean
                                              Stage stage)
     throws OverloadedException
     {
+        int targetsSize = Iterables.size(targets);
+
+        // this dc replicas:
+        Collection<InetAddress> localDc = null;
         // extra-datacenter replicas, grouped by dc
         Map<String, Collection<InetAddress>> dcGroups = null;
         // only need to create a Message for non-local writes
@@ -1231,6 +1245,8 @@ public class StorageProxy implements StorageProxyMBean
 
         boolean insertLocal = false;
         ArrayList<InetAddress> endpointsToHint = null;
+
+        List<InetAddress> backPressureHosts = null;
 
         for (InetAddress destination : targets)
         {
@@ -1247,12 +1263,17 @@ public class StorageProxy implements StorageProxyMBean
                     // belongs on a different server
                     if (message == null)
                         message = mutation.createMessage();
+
                     String dc = DatabaseDescriptor.getEndpointSnitch().getDatacenter(destination);
+
                     // direct writes to local DC or old Cassandra versions
                     // (1.1 knows how to forward old-style String message IDs; updated to int in 2.0)
                     if (localDataCenter.equals(dc))
                     {
-                        MessagingService.instance().sendRR(message, destination, responseHandler, true);
+                        if (localDc == null)
+                            localDc = new ArrayList<>(targetsSize);
+
+                        localDc.add(destination);
                     }
                     else
                     {
@@ -1264,8 +1285,14 @@ public class StorageProxy implements StorageProxyMBean
                                 dcGroups = new HashMap<>();
                             dcGroups.put(dc, messages);
                         }
+
                         messages.add(destination);
                     }
+
+                    if (backPressureHosts == null)
+                        backPressureHosts = new ArrayList<>(targetsSize);
+
+                    backPressureHosts.add(destination);
                 }
             }
             else
@@ -1273,11 +1300,15 @@ public class StorageProxy implements StorageProxyMBean
                 if (shouldHint(destination))
                 {
                     if (endpointsToHint == null)
-                        endpointsToHint = new ArrayList<>(Iterables.size(targets));
+                        endpointsToHint = new ArrayList<>(targetsSize);
+
                     endpointsToHint.add(destination);
                 }
             }
         }
+
+        if (backPressureHosts != null)
+            MessagingService.instance().applyBackPressure(backPressureHosts, responseHandler.currentTimeout());
 
         if (endpointsToHint != null)
             submitHint(mutation, endpointsToHint, responseHandler);
@@ -1285,12 +1316,14 @@ public class StorageProxy implements StorageProxyMBean
         if (insertLocal)
             performLocally(stage, Optional.of(mutation), mutation::apply, responseHandler);
 
+        if (localDc != null)
+        {
+            for (InetAddress destination : localDc)
+                MessagingService.instance().sendRR(message, destination, responseHandler, true);
+        }
         if (dcGroups != null)
         {
             // for each datacenter, send the message to one node to relay the write to other replicas
-            if (message == null)
-                message = mutation.createMessage();
-
             for (Collection<InetAddress> dcTargets : dcGroups.values())
                 sendMessagesToNonlocalDC(message, dcTargets, responseHandler);
         }
@@ -1842,7 +1875,7 @@ public class StorageProxy implements StorageProxyMBean
         {
             try
             {
-                command.setMonitoringTime(new ConstructionTime(constructionTime), verb.getTimeout(), DatabaseDescriptor.getSlowQueryTimeout());
+                command.setMonitoringTime(constructionTime, false, verb.getTimeout(), DatabaseDescriptor.getSlowQueryTimeout());
 
                 ReadResponse response;
                 try (ReadExecutionController executionController = command.executionController();
@@ -2384,7 +2417,13 @@ public class StorageProxy implements StorageProxyMBean
 
     public void setHintedHandoffEnabled(boolean b)
     {
-        DatabaseDescriptor.setHintedHandoffEnabled(b);
+        synchronized (StorageService.instance)
+        {
+            if (b)
+                StorageService.instance.checkServiceAllowedToStart("hinted handoff");
+
+            DatabaseDescriptor.setHintedHandoffEnabled(b);
+        }
     }
 
     public void enableHintsForDC(String dc)

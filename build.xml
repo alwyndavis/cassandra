@@ -25,7 +25,7 @@
     <property name="debuglevel" value="source,lines,vars"/>
 
     <!-- default version and SCM information -->
-    <property name="base.version" value="3.10"/>
+    <property name="base.version" value="4.0"/>
     <property name="scm.connection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.developerConnection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.url" value="http://git-wip-us.apache.org/repos/asf?p=cassandra.git;a=tree"/>
@@ -366,7 +366,7 @@
           <dependency groupId="com.google.guava" artifactId="guava" version="18.0"/>
           <dependency groupId="org.hdrhistogram" artifactId="HdrHistogram" version="2.1.9"/>
           <dependency groupId="commons-cli" artifactId="commons-cli" version="1.1"/>
-          <dependency groupId="commons-codec" artifactId="commons-codec" version="1.2"/>
+          <dependency groupId="commons-codec" artifactId="commons-codec" version="1.9"/>
           <dependency groupId="org.apache.commons" artifactId="commons-lang3" version="3.1"/>
           <dependency groupId="org.apache.commons" artifactId="commons-math3" version="3.2"/>
           <dependency groupId="com.googlecode.concurrentlinkedhashmap" artifactId="concurrentlinkedhashmap-lru" version="1.4"/>
@@ -426,7 +426,7 @@
           <dependency groupId="org.apache.cassandra" artifactId="cassandra-thrift" version="${version}" />
           <dependency groupId="io.dropwizard.metrics" artifactId="metrics-core" version="3.1.0" />
           <dependency groupId="io.dropwizard.metrics" artifactId="metrics-jvm" version="3.1.0" />
-          <dependency groupId="com.addthis.metrics" artifactId="reporter-config3" version="3.0.0" />
+          <dependency groupId="com.addthis.metrics" artifactId="reporter-config3" version="3.0.3" />
           <dependency groupId="org.mindrot" artifactId="jbcrypt" version="0.3m" />
           <dependency groupId="io.airlift" artifactId="airline" version="0.6" />
           <dependency groupId="io.netty" artifactId="netty-all" version="4.0.39.Final" />
@@ -448,7 +448,6 @@
           <dependency groupId="joda-time" artifactId="joda-time" version="2.4" />
           <dependency groupId="com.carrotsearch" artifactId="hppc" version="0.5.4" />
           <dependency groupId="de.jflex" artifactId="jflex" version="1.6.0" />
-          <dependency groupId="net.mintern" artifactId="primitive" version="1.0" />
           <dependency groupId="com.github.rholder" artifactId="snowball-stemmer" version="1.3.0.581.1" />
           <dependency groupId="com.googlecode.concurrent-trees" artifactId="concurrent-trees" version="2.4.0" />
 	  <dependency groupId="com.github.ben-manes.caffeine" artifactId="caffeine" version="2.2.6" />
@@ -636,7 +635,6 @@
         <dependency groupId="org.apache.thrift" artifactId="libthrift"/>
         <dependency groupId="com.carrotsearch" artifactId="hppc" version="0.5.4" />
         <dependency groupId="de.jflex" artifactId="jflex" version="1.6.0" />
-        <dependency groupId="net.mintern" artifactId="primitive" version="1.0" />
         <dependency groupId="com.github.rholder" artifactId="snowball-stemmer" version="1.3.0.581.1" />
         <dependency groupId="com.googlecode.concurrent-trees" artifactId="concurrent-trees" version="2.4.0" />
 
@@ -1788,7 +1786,7 @@
   <classpathentry kind="src" path="tools/stress/src"/>
   <classpathentry kind="src" output="build/test/stress-classes" path="tools/stress/test/unit" />
   <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
-  <classpathentry kind="output" path="build/classes/main"/>
+  <classpathentry kind="output" path="build/classes/eclipse"/>
   <classpathentry kind="lib" path="build/classes/thrift" sourcepath="interface/thrift/gen-java/"/>
   <classpathentry kind="lib" path="test/conf"/>
   <classpathentry kind="lib" path="${java.home}/../lib/tools.jar"/>

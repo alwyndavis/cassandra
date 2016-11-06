@@ -35,7 +35,6 @@ import org.slf4j.LoggerFactory;
 import com.googlecode.concurrentlinkedhashmap.ConcurrentLinkedHashMap;
 import org.antlr.runtime.*;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
-import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.config.SchemaConstants;
@@ -53,9 +52,11 @@ import org.apache.cassandra.service.*;
 import org.apache.cassandra.service.pager.QueryPager;
 import org.apache.cassandra.thrift.ThriftClientState;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.transport.Server;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.*;
+
+import static org.apache.cassandra.cql3.statements.RequestValidations.checkTrue;
 
 public class QueryProcessor implements QueryHandler
 {
@@ -340,7 +341,7 @@ public class QueryProcessor implements QueryHandler
             throw new IllegalArgumentException("Only SELECTs can be paged");
 
         SelectStatement select = (SelectStatement)prepared.statement;
-        QueryPager pager = select.getQuery(makeInternalOptions(prepared, values), FBUtilities.nowInSeconds()).getPager(null, Server.CURRENT_VERSION);
+        QueryPager pager = select.getQuery(makeInternalOptions(prepared, values), FBUtilities.nowInSeconds()).getPager(null, ProtocolVersion.CURRENT);
         return UntypedResultSet.create(select, pager, pageSize);
     }
 
@@ -437,13 +438,23 @@ public class QueryProcessor implements QueryHandler
         {
             Integer thriftStatementId = computeThriftId(queryString, keyspace);
             ParsedStatement.Prepared existing = thriftPreparedStatements.get(thriftStatementId);
-            return existing == null ? null : ResultMessage.Prepared.forThrift(thriftStatementId, existing.boundNames);
+            if (existing == null)
+                return null;
+
+            checkTrue(queryString.equals(existing.rawCQLStatement),
+                      String.format("MD5 hash collision: query with the same MD5 hash was already prepared. \n Existing: '%s'", existing.rawCQLStatement));
+            return ResultMessage.Prepared.forThrift(thriftStatementId, existing.boundNames);
         }
         else
         {
             MD5Digest statementId = computeId(queryString, keyspace);
             ParsedStatement.Prepared existing = preparedStatements.get(statementId);
-            return existing == null ? null : new ResultMessage.Prepared(statementId, existing);
+            if (existing == null)
+                return null;
+
+            checkTrue(queryString.equals(existing.rawCQLStatement),
+                      String.format("MD5 hash collision: query with the same MD5 hash was already prepared. \n Existing: '%s'", existing.rawCQLStatement));
+            return new ResultMessage.Prepared(statementId, existing);
         }
     }
 
@@ -546,6 +557,22 @@ public class QueryProcessor implements QueryHandler
         return statement.prepare();
     }
 
+    public static <T extends ParsedStatement> T parseStatement(String queryStr, Class<T> klass, String type) throws SyntaxException
+    {
+        try
+        {
+            ParsedStatement stmt = parseStatement(queryStr);
+
+            if (!klass.isAssignableFrom(stmt.getClass()))
+                throw new IllegalArgumentException("Invalid query, must be a " + type + " statement but was: " + stmt.getClass());
+
+            return klass.cast(stmt);
+        }
+        catch (RequestValidationException e)
+        {
+            throw new IllegalArgumentException(e.getMessage(), e);
+        }
+    }
     public static ParsedStatement parseStatement(String queryStr) throws SyntaxException
     {
         try
@@ -622,7 +649,7 @@ public class QueryProcessor implements QueryHandler
             while (iterator.hasNext())
             {
                 Map.Entry<MD5Digest, ParsedStatement.Prepared> entry = iterator.next();
-                if (shouldInvalidate(ksName, cfName, entry.getValue().statement)) 
+                if (shouldInvalidate(ksName, cfName, entry.getValue().statement))
                 {
                     SystemKeyspace.removePreparedStatement(entry.getKey());
                     iterator.remove();
